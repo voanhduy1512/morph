@@ -16,7 +16,7 @@ pkgs.buildGoModule rec {
     ldflags+=" -X main.assetRoot=$lib"
   '';
 
-  vendorSha256 = "08zzp0h4c4i5hk4whz06a3da7qjms6lr36596vxz0d8q0n7rspr9";
+  vendorSha256 = "1vf0p9xgjgpkrky41mv4ybp0hc3lls1hgh719d2al01gj8ccxhrn";
 
   postInstall = ''
     mkdir -p $lib

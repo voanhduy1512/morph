@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/DBCDK/kingpin"
 	"github.com/DBCDK/morph/filter"
@@ -15,6 +18,7 @@ import (
 	"github.com/DBCDK/morph/secrets"
 	"github.com/DBCDK/morph/ssh"
 	"github.com/DBCDK/morph/utils"
+	"github.com/hashicorp/go-multierror"
 )
 
 // These are set at build time via -ldflags magic
@@ -31,6 +35,7 @@ var (
 	selectEvery         int
 	selectSkip          int
 	selectLimit         int
+	jobsLimit           int
 	orderingTags        string
 	deployment          string
 	timeout             int
@@ -99,6 +104,9 @@ func selectorFlags(cmd *kingpin.CmdClause) {
 		IntVar(&selectSkip)
 	cmd.Flag("limit", "Select at most n hosts").
 		IntVar(&selectLimit)
+	cmd.Flag("jobs", "Max jobs run as same time").
+		Default(strconv.Itoa(runtime.NumCPU())).
+		IntVar(&jobsLimit)
 	cmd.Flag("order-by-tags", "Order hosts by tags (comma separated list)").
 		Default("").
 		StringVar(&orderingTags)
@@ -296,17 +304,18 @@ func handleError(err error) {
 func execExecute(hosts []nix.Host) error {
 	sshContext := createSSHContext()
 
-	for _, host := range hosts {
+	err := runInParallel(hosts, func(host nix.Host) error {
 		if host.BuildOnly {
 			fmt.Fprintf(os.Stderr, "Exec is disabled for build-only host: %s\n", host.Name)
-			continue
+			return nil
 		}
 		fmt.Fprintln(os.Stderr, "** "+host.Name)
 		sshContext.CmdInteractive(&host, timeout, executeCommand...)
 		fmt.Fprintln(os.Stderr)
-	}
+		return nil
+	})
 
-	return nil
+	return err
 }
 
 func execBuild(hosts []nix.Host) (string, error) {
@@ -450,14 +459,14 @@ func createSSHContext() *ssh.SSHContext {
 func execHealthCheck(hosts []nix.Host) error {
 	sshContext := createSSHContext()
 
-	var err error
-	for _, host := range hosts {
+	err := runInParallel(hosts, func(host nix.Host) error {
 		if host.BuildOnly {
 			fmt.Fprintf(os.Stderr, "Healthchecks are disabled for build-only host: %s\n", host.Name)
-			continue
+			return nil
 		}
-		err = healthchecks.Perform(sshContext, &host, timeout)
-	}
+		err := healthchecks.Perform(sshContext, &host, timeout)
+		return err
+	})
 
 	if err != nil {
 		err = errors.New("One or more errors occurred during host healthchecks")
@@ -467,10 +476,10 @@ func execHealthCheck(hosts []nix.Host) error {
 }
 
 func execUploadSecrets(sshContext *ssh.SSHContext, hosts []nix.Host, phase *string) error {
-	for _, host := range hosts {
+	err := runInParallel(hosts, func(host nix.Host) error {
 		if host.BuildOnly {
 			fmt.Fprintf(os.Stderr, "Secret upload is disabled for build-only host: %s\n", host.Name)
-			continue
+			return nil
 		}
 		singleHostInList := []nix.Host{host}
 
@@ -487,9 +496,10 @@ func execUploadSecrets(sshContext *ssh.SSHContext, hosts []nix.Host, phase *stri
 				return err
 			}
 		}
-	}
+		return nil
+	})
 
-	return nil
+	return err
 }
 
 func execListSecrets(hosts []nix.Host) {
@@ -624,10 +634,11 @@ func buildHosts(hosts []nix.Host) (resultPath string, err error) {
 }
 
 func pushPaths(sshContext *ssh.SSHContext, filteredHosts []nix.Host, resultPath string) error {
-	for _, host := range filteredHosts {
+
+	err := runInParallel(filteredHosts, func(host nix.Host) error {
 		if host.BuildOnly {
 			fmt.Fprintf(os.Stderr, "Push is disabled for build-only host: %s\n", host.Name)
-			continue
+			return nil
 		}
 
 		paths, err := nix.GetPathsToPush(host, resultPath)
@@ -642,16 +653,17 @@ func pushPaths(sshContext *ssh.SSHContext, filteredHosts []nix.Host, resultPath 
 		if err != nil {
 			return err
 		}
-	}
+		return nil
+	})
 
-	return nil
+	return err
 }
 
 func secretsUpload(ctx ssh.Context, filteredHosts []nix.Host, phase *string) error {
 	// upload secrets
 	// relative paths are resolved relative to the deployment file (!)
 	deploymentDir := filepath.Dir(deployment)
-	for _, host := range filteredHosts {
+	err := runInParallel(filteredHosts, func(host nix.Host) error {
 		fmt.Fprintf(os.Stderr, "Uploading secrets to %s (%s):\n", host.Name, host.TargetHost)
 		postUploadActions := make(map[string][]string, 0)
 		for secretName, secret := range host.Secrets {
@@ -690,16 +702,16 @@ func secretsUpload(ctx ssh.Context, filteredHosts []nix.Host, phase *string) err
 			// Errors from secret actions will be printed on screen, but we won't stop the flow if they fail
 			ctx.CmdInteractive(&host, timeout, action...)
 		}
-	}
+		return nil
+	})
 
-	return nil
+	return err
 }
 
 func activateConfiguration(ctx ssh.Context, filteredHosts []nix.Host, resultPath string) error {
 	fmt.Fprintln(os.Stderr, "Executing '"+deploySwitchAction+"' on matched hosts:")
 	fmt.Fprintln(os.Stderr)
-	for _, host := range filteredHosts {
-
+	err := runInParallel(filteredHosts, func(host nix.Host) error {
 		fmt.Fprintln(os.Stderr, "** "+host.Name)
 
 		configuration, err := nix.GetNixSystemPath(host, resultPath)
@@ -713,7 +725,52 @@ func activateConfiguration(ctx ssh.Context, filteredHosts []nix.Host, resultPath
 		}
 
 		fmt.Fprintln(os.Stderr)
+		return nil
+	})
+
+	return err
+}
+
+func runInParallel(filteredHosts []nix.Host, f func(host nix.Host) error) error {
+	var wg sync.WaitGroup
+
+	numOfHosts := len(filteredHosts)
+	wgDone := make(chan bool)
+	jobs := make(chan nix.Host, numOfHosts)
+	errChannel := make(chan error, numOfHosts)
+	wg.Add(jobsLimit)
+
+	for i := 0; i < jobsLimit; i++ {
+		go func() {
+			for job := range jobs {
+				err := f(job)
+				if err != nil {
+					errChannel <- err
+				}
+			}
+			wg.Done()
+		}()
 	}
 
-	return nil
+	for _, host := range filteredHosts {
+		jobs <- host
+	}
+	close(jobs)
+
+	go func() {
+		wg.Wait()
+		wgDone <- true
+	}()
+
+	var result error
+	for {
+		select {
+		case err := <-errChannel:
+			result = multierror.Append(result, err)
+		case <-wgDone:
+			return result
+		}
+	}
+
+	return result
 }

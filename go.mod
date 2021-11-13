@@ -7,6 +7,7 @@ require (
 	github.com/alecthomas/template v0.0.0-20190718012654-fb15b899a751 // indirect
 	github.com/alecthomas/units v0.0.0-20210208195552-ff826a37aa15 // indirect
 	github.com/gobwas/glob v0.2.3
+	github.com/hashicorp/go-multierror v1.1.1
 	golang.org/x/crypto v0.0.0-20210503195802-e9a32991a82e
 	golang.org/x/sys v0.0.0-20210503173754-0981d6026fa6 // indirect
 	golang.org/x/term v0.0.0-20210503060354-a79de5458b56 // indirect
