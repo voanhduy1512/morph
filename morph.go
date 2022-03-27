@@ -380,10 +380,10 @@ func execDeploy(hosts []nix.Host) (string, error) {
 
 	sshContext := createSSHContext()
 
-	for _, host := range hosts {
+	err = runInParallel(hosts, func(host nix.Host) error {
 		if host.BuildOnly {
 			fmt.Fprintf(os.Stderr, "Deployment steps are disabled for build-only host: %s\n", host.Name)
-			continue
+			return nil
 		}
 
 		singleHostInList := []nix.Host{host}
@@ -391,7 +391,7 @@ func execDeploy(hosts []nix.Host) (string, error) {
 		if doPush {
 			err = pushPaths(sshContext, singleHostInList, resultPath)
 			if err != nil {
-				return "", err
+				return err
 			}
 		}
 		fmt.Fprintln(os.Stderr)
@@ -400,7 +400,7 @@ func execDeploy(hosts []nix.Host) (string, error) {
 			phase := "pre-activation"
 			err = execUploadSecrets(sshContext, singleHostInList, &phase)
 			if err != nil {
-				return "", err
+				return err
 			}
 
 			fmt.Fprintln(os.Stderr)
@@ -409,7 +409,7 @@ func execDeploy(hosts []nix.Host) (string, error) {
 		if doActivate {
 			err = activateConfiguration(sshContext, singleHostInList, resultPath)
 			if err != nil {
-				return "", err
+				return err
 			}
 		}
 
@@ -417,7 +417,7 @@ func execDeploy(hosts []nix.Host) (string, error) {
 			err = host.Reboot(sshContext)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "Reboot failed")
-				return "", err
+				return err
 			}
 		}
 
@@ -425,7 +425,7 @@ func execDeploy(hosts []nix.Host) (string, error) {
 			phase := "post-activation"
 			err = execUploadSecrets(sshContext, singleHostInList, &phase)
 			if err != nil {
-				return "", err
+				return err
 			}
 
 			fmt.Fprintln(os.Stderr)
@@ -441,6 +441,11 @@ func execDeploy(hosts []nix.Host) (string, error) {
 		}
 
 		fmt.Fprintln(os.Stderr, "Done:", host.Name)
+		return nil
+	})
+
+	if err != nil {
+		return "", err
 	}
 
 	return resultPath, nil
